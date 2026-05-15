@@ -136,11 +136,11 @@ export ledger max_float_bps: Uint<16>;
 // The vault's reported liquid balance of underlying tokens, in base units.
 // Incremented by authorize_return and claim_deposit. Decremented by manager_withdraw
 // and process_withdraw.
-export ledger total_liquid: Counter;
+export ledger total_liquid: Uint<128>;
 
 // The amount of underlying tokens currently deployed externally by the manager.
 // Incremented by manager_withdraw. Decremented by manager_deposit.
-export ledger float_outstanding: Counter;
+export ledger float_outstanding: Uint<128>;
 
 // ── Share Accounting ──────────────────────────────────────────────────────────
 
@@ -148,7 +148,7 @@ export ledger float_outstanding: Counter;
 // Incremented when shares are minted (deposit). Decremented when shares are burned
 // into a withdrawal ticket (request_withdraw). Incremented again on cancel_withdraw
 // (new coin reminted to user).
-export ledger total_share_supply: Counter;
+export ledger total_share_supply: Uint<128>;
 
 // The number of shares that have been burned into pending withdrawal tickets
 // but whose corresponding underlying assets have not yet been paid out.
@@ -161,7 +161,7 @@ export ledger total_share_supply: Counter;
 // shareholders experience no price distortion when tickets are created or cancelled.
 // Price changes only occur at the economically correct moments: deposit (new capital
 // enters) and process_withdraw (capital exits proportionally).
-export ledger shares_pending_withdrawal: Counter;
+export ledger shares_pending_withdrawal: Uint<128>;
 
 // ── Deposit Authorization ─────────────────────────────────────────────────────
 
@@ -279,17 +279,17 @@ to create a new shielded coin of share value and delivers it to the user's ZSwap
 The user's public key is provided through a witness function:
 
 ```compact
-witness depositorZswapKey(): ZswapCoinPublicKey;
-
 circuit mint_shares_to_user(share_amount: Uint<128>, nonce: Bytes<32>): ShieldedCoinInfo {
+  assert(share_amount <= 18446744073709551615, "share amount exceeds Uint<64>");
+  const share_amount_64: Uint<64> = share_amount as Uint<64>;
   const recipient_key = depositorZswapKey();
   const coin = mintShieldedToken(
     disclose(share_domain()),
-    disclose(share_amount),
+    disclose(share_amount_64),
     disclose(nonce),
     left<ZswapCoinPublicKey, ContractAddress>(disclose(recipient_key))
   );
-  total_share_supply.increment(disclose(share_amount));
+  total_share_supply = disclose(total_share_supply + share_amount);
   return coin;
 }
 ```
