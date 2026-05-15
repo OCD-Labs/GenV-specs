@@ -1,171 +1,85 @@
-# GenV — Pre-build sync (for Yemi's review)
-
-I'd like you to **approve, push back, or flag what won't work** — ideally before either of us writes serious code, so we don't compound mismatches over 48 hours.
-
-Each section is short. Just react with ✅ / ❌ / "need to talk."
+# GenV — Pre-build sync (round 2, after reading your specs)
 
 ---
 
-## 1. The demo storyboard — confirm this is what we're building toward
+## 🔴 Critical: does Lace actually track contract-minted shielded coins?
 
-The 2-minute video has four beats. Everything else is out of scope.
+Your Frontend Reference §6.1 says `claim_deposit` returns `ShieldedCoinInfo` and "the SDK stores this automatically in the wallet's private state. The frontend does not need to handle the return value directly." And §8 says I can read user balance via `wallet.getShieldedBalance(CONTRACT_ADDRESS)`.
 
-| Time | Beat | Contract calls |
-|---|---|---|
-| 0:00–0:30 | Two users deposit (different amounts). Public Ledger View panel shows only aggregate numbers — no per-user data. | `authorize_deposit` × 2, `claim_deposit` × 2 |
-| 0:30–1:00 | Agent decides on a 5-minute Polymarket BTC market, places a real ~$1 trade. `float_outstanding` rises on Midnight, no on-chain link to the Polygon side. | `manager_withdraw` |
-| 1:00–1:30 | Market resolves via Chainlink in seconds. Profit returns. Share price ticks up. | `manager_deposit` |
-| 1:30–2:00 | User withdraws, receives more than they deposited. | `request_withdraw`, `process_withdraw` |
+A forum thread from April ([link](https://forum.midnight.network/t/shielded-kernel-operations-receiveshielded-mintshieldedtoken-fail-with-proof-server-400/1137) and related discussions) suggested Lace does NOT auto-track contract-minted shielded coins from `mintShieldedToken` — that the DApp has to persist them to IndexedDB itself. This would mean I'd need to build a manual persistence layer.
 
-**❓ Sound right? Anything you'd cut or add?**
+**Which is true?** If Lace tracks them, my UI is much simpler. If not, I have meaningful additional work. I can verify empirically by running the bboard tutorial on Preview and checking if balance persists across browser reloads — happy to do that on Day 1. But if you've already confirmed it one way or the other, that'd save me the check.
 
 ---
 
-## 2. Contract scope — these are the 7 circuits we actually need
+## 🔴 Critical: deposit flow ordering for the demo
 
-In-scope (must work end-to-end for the demo):
-- `initialize_vault`
-- `authorize_deposit`
-- `claim_deposit` (including first-deposit branch + dead-share burn)
-- `manager_withdraw`
-- `manager_deposit`
-- `request_withdraw`
-- `process_withdraw`
+Your Manager Reference §5.1 + §7 (ordering rules) requires: real USDC arrives at the manager's Polygon wallet → confirm → call `authorize_deposit`. Hard rule: never authorize without receiving funds first.
 
-Plus the supporting helpers in your design doc (`share_domain`, `total_assets`, `effective_supply`, `assert_manager`, `mint_shares_to_user`, `burn_shares`).
+For the hackathon hosted demo (judges visit a URL on Preview), I can't realistically require judges to send real USDC to a manager wallet. My plan was to run the agent with a `DEPOSIT_MODE=demo` flag in the hosted environment that skips the Polygon-side check — the user clicks "Deposit $50 (demo)" in the UI, the UI POSTs the intent to the agent, the agent calls `authorize_deposit` immediately.
 
-Out of scope for the 48-hour build???:
-- `cancel_withdraw`
-- `update_manager` / `accept_manager`
-- `set_float_cap` (set once at init, never changed)
-- Float-cap-stress logic from §15 of your design doc
-- Multi-ticket queue handling beyond one ticket at a time
+For the recorded demo and any production code path, we'd keep your real ordering.
 
-**❓ OK to cut the above? Are these 7 enough on your side? Have you already started implementing any of the cut circuits — if yes, sunk cost rules apply and we'll keep them, just won't demo them.**
+**Are you OK with the demo-mode shortcut for the hosted version?** Same code path, env-gated. Without it, the hosted version doesn't work for judges who can't fund a Polygon wallet on the spot.
 
 ---
 
-## 3. Required design tweak — drop plaintext fields from `DepositAuthorization`
+## 🟡 Polymarket collateral — USDC.e or pUSD?
 
-In §4.1 of your design doc, the struct is:
+Your Manager Reference §2 uses USDC.e (`0x2791Bca1f2de4661ED88A30C99A7a9449Aa84174`).
 
-```compact
-struct DepositAuthorization {
-  user_key:   Bytes<32>;
-  amount:     Uint<128>;
-  nonce:      Bytes<32>;
-  is_claimed: Boolean;
-}
-```
+Polymarket [migrated collateral to pUSD in April 2026](https://help.polymarket.com/en/articles/14762452-polymarket-exchange-upgrade-april-28-2026). pUSD is 1:1-backed by USDC but a separate ERC-20 with a different Exchange contract.
 
-I'd like to ask you to **drop `user_key`, `amount`, `nonce` from the struct and keep only `is_claimed`.**
+If the vault holds USDC.e, the agent has to swap USDC.e ⇄ pUSD around every Polymarket trade. Friction.
 
-Why: the `auth_key` is already `persistentHash([user_key, amount, nonce])`, so all three are cryptographically committed into the key. Storing them again in the struct's value means they end up plaintext in the public ledger — which contradicts the privacy claim in your own §3 ("Individual deposit amount → Private → Never disclosed in circuit execution").
-
-Why it matters for the demo: I'm building a "Public Ledger View" tab in the UI that shows the chain state live during beat 1. If the struct keeps plaintext, the on-screen view would show per-user deposit amounts and the privacy claim collapses. With only `is_claimed`, the view shows opaque hashes — which is exactly the story we want.
-
-~10 minute change in the struct definition + the `authorize_deposit` and `claim_deposit` circuits (delete the redundant assertions).
-
-**❓ Can you confirm you'll make this change?**
+**My recommendation:** use pUSD throughout. Vault accepts pUSD deposits, holds pUSD, sends pUSD payouts. One less moving part. OK with that?
 
 ---
 
-## 4. `claim_deposit` return value — clarification
+## 🟡 First deposit minimum — 1000 USDC is a lot for the demo
 
-Does `claim_deposit` return `ShieldedCoinInfo` directly to the caller, so my UI can grab it and write it to IndexedDB? Or is there a separate `receiveShielded` ceremony after the circuit call?
+§9 of the contract design: `MINIMUM_FIRST_DEPOSIT = 1_000` (base units), scaled by 6 decimals = 1000 USDC. That's a meaningful amount for a hackathon demo (1000 pUSD is real money on Polygon mainnet, and Preview faucet may not dispense that much in one go).
 
-This affects my deposit UI shape — Lace doesn't auto-track contract-minted shielded coins, so I have to persist them myself in the browser. The forum threads I read suggest the contract has to either `sendImmediateShielded` it or persist it itself.
+**My plan:** I generate the manager seed, deploy the vault, and pre-seed it with a 1000+ USDC first deposit during the init script — so the demo never hits the cold-start branch. The recorded demo storyboard would just show normal deposits from depositor 2 and 3, not the cold start.
 
-**❓ What's the exact return shape you're planning for `claim_deposit`? Same question for `cancel_withdraw` (though that's out of scope) and `process_withdraw`.**
+**Alternative:** drop `MINIMUM_FIRST_DEPOSIT` to something like 10 or 100 for the hackathon. ~1 line change.
 
----
-
-## 5. Toolchain pinning
-
-I'm planning to pin on the UI/agent side:
-- `compactc` 0.31.0
-- `@midnight-ntwrk/compact-runtime` ^0.16.0
-
-These are the versions our research found compatible. Misalignment here apparently breaks everything in subtle ways.
-
-**❓ What versions are you using? If different, let's pick one set together.**
+**Which do you prefer?**
 
 ---
 
-## 6. Network — Preview, pending Jay's follow-up
+## 🟢 Confirmation items (likely just yes)
 
-Jay (Midnight team) confirmed mainnet is not required. He recommended **preprod**, but I asked a follow-up about the April thread reporting `mintShieldedToken` / `receiveShielded` / `sendShielded` failing on preprod with proof-server HTTP 400 ([forum link](https://forum.midnight.network/t/shielded-kernel-operations-receiveshielded-mintshieldedtoken-fail-with-proof-server-400/1137)).
+1. **Is `cancel_withdraw` still in your scope?** You included it in the Frontend Reference, but we'd planned to cut it from the demo. If you've already started it, we keep it (just won't demo it). If not, we cut it. Either is fine for me — the frontend reference makes it trivially easy to add a UI button if it exists.
 
-Plan:
-- **If preprod bug confirmed fixed** → deploy to preprod.
-- **If still broken** → deploy to Preview (faucet available, working shielded ops per the bboard tutorial).
+2. **Proof generation benchmarks** — can you run each of the demo's circuits on the recording machine and report median + p99 by hour 8 of the hackathon? Our 2-min storyboard packs 7 proofs; if any one exceeds 15s p99, we have to pre-generate some of them rather than run them live.
 
-We'll know once Jay replies.
+3. **Network: Preview as default?** Mainnet is not required (Jay confirmed in Discord). I'm waiting on Jay's follow-up about whether preprod's shielded-op bug is fixed. Until that resolves, defaulting to Preview (faucet works, shielded ops apparently work per the bboard tutorial).
 
-**❓ Any objection to Preview as the default until that resolves?**
+4. **You deploy the contract; I generate the manager seed and run `initialize_vault`** from a script. You don't need to touch the seed. After init, the deployer wallet IS the manager — no separate `update_manager` ceremony needed. OK?
 
 ---
 
-## 7. Manager seed + who deploys what
+## What I'm building (no action needed, just FYI)
 
-Proposal:
-- **You** deploy the contract bytecode to the network and give me the contract address.
-- **I** generate the manager seed (32 bytes, lives in my `.env` + Railway secrets), then call `initialize_vault(max_float_bps=8000)` from a script.
+- **UI**: React DApp scaffolded from your Frontend Reference. Wallet via Lace. Calls `claim_deposit` / `request_withdraw` / (optional `cancel_withdraw`). Polls indexer every 12s for `Ledger` state. Has a "Public Ledger View" tab that renders the full on-chain state to make the privacy claim demonstrable on video. Deployed to Vercel.
+- **Agent**: Node.js process using `WalletBuilder.buildFromSeed` with the manager seed. Implements your four loops (deposit / withdrawal processing / capital deployment / capital return) from Manager Reference §5. Also runs an HTTP endpoint `POST /authorize` for deposit intents from the UI. Polymarket via `@polymarket/clob-client-v2`. LLM decisions via Claude. Deployed to Railway.
 
-This way you don't have to handle the seed (and don't accidentally commit it). The agent (which signs everything) and the seed live in the same place.
-
-For the hosted version, the vault will be pre-seeded with one cycle of activity (first deposit + dead shares processed) so judges who visit land on a "warm" vault and experience the normal deposit path, not the cold-start branch with its 1:1 mint quirks. For the recorded demo, I'll use a separate fresh deployment so the cold-start narrative plays cleanly.
-
-**❓ OK with this split?**
+Both target the same network (Preview, pending). Both runnable locally for dev iteration.
 
 ---
 
-## 8. Proof generation benchmarks — the highest-risk unknown
+## TL;DR — replies I most need from you
 
-The 2-minute video packs **7 ZK proofs** (2× `claim_deposit`, 1× `manager_withdraw`, 1× `manager_deposit`, 1× `request_withdraw`, 1× `process_withdraw`, plus 2× `authorize_deposit` from the agent during beat 1).
+| #   | Item                                                 | Need from you                 |
+| --- | ---------------------------------------------------- | ----------------------------- |
+| 1   | Does Lace track contract-minted shielded coins?      | Yes / no / "test it on Day 1" |
+| 2   | Demo-mode deposit shortcut (no real USDC for hosted) | ✅ / ❌                       |
+| 3   | pUSD vs USDC.e                                       | Pick one                      |
+| 4   | First deposit: pre-seed or lower MINIMUM             | Pick one                      |
+| 5   | Cancellation in scope?                               | ✅ / ❌                       |
+| 6   | Proof benchmarks by hour 8                           | ✅ / ❌                       |
+| 7   | Preview as default network                           | ✅ / ❌                       |
+| 8   | You deploy, I init                                   | ✅ / ❌                       |
 
-If proof generation is slow (15+ seconds per proof), the demo doesn't fit in 120 seconds and we have to redesign — probably by pre-generating proofs in advance and submitting them at the right beat.
-
-I need you to run each in-scope circuit on the recording machine and report??:
-- Median proof generation time per circuit
-- p99 (worst-case observed)
-
-By **hour 8 of the hackathon**, ideally. This gates whether we proceed with the storyboard as-is or restructure.
-
-**❓ Can you commit to having benchmarks by hour 8?**
-
----
-
-## 9. What I'm building (FYI, no action needed)
-
-- **UI**: React DApp scaffolded from the bboard template, deployed to Vercel. Connects to Lace, calls your circuits via the generated TS client, persists shielded coins to IndexedDB, has a "Public Ledger View" tab.
-- **Agent**: Node.js process on Railway. Wears three hats — (1) signs all manager circuits, (2) Polymarket trader loop, (3) HTTP endpoint at `POST /authorize` that turns user deposit intents into `authorize_deposit` calls.
-- Both target the same network. Both also runnable locally against Docker for dev iteration.
-- Anything that depends on the contract shape, I'll mock against your generated TS interface until your version is ready.
-
----
-
-## 10. Things to flag back to me
-
-If you disagree with anything above, push back. Particularly:
-- Anything you've already started that's outside the in-scope list
-- Anything in the in-scope list you don't think you can deliver in 48h
-- The `DepositAuthorization` privacy fix (§3) — this is the one I most need you to commit to or refuse
-- Different opinions on network choice (§6), toolchain pinning (§5), or who-deploys-what (§7)
-
----
-
-**TL;DR for fast scan:**
-
-| # | Item | Need from you |
-|---|---|---|
-| 1 | Storyboard | ✅ / ❌ |
-| 2 | 7 in-scope circuits, cut the rest | ✅ / ❌, + "have I already started cut work?" |
-| 3 | Drop plaintext from `DepositAuthorization` | ✅ / ❌ — this is the load-bearing one |
-| 4 | `claim_deposit` return shape | Clarify |
-| 5 | compactc 0.31.0 + runtime 0.16.x | Match versions or propose alternatives |
-| 6 | Preview by default | ✅ / ❌ |
-| 7 | I generate seed + init; you deploy contract | ✅ / ❌ |
-| 8 | Proof benchmarks by hour 8 | ✅ / ❌ |
-
-Reply on any of these and we sync from there. Thanks 🙏
+Thanks for shipping the specs in advance — saved both of us a lot of round-trips.
